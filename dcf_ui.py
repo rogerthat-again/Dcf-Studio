@@ -388,4 +388,4 @@ def footer_html() -> str:
             "assumptions. Financial ratios are calculated mathematically from raw statements to ensure 100% accuracy. "
             "Always cross-check important numbers on NSE or Screener.in before relying on them. "
             "Not suitable for banks and financial companies.<br><br>"
-            "<span style='color: #6EA2FF; font-weight: 600; font-size: 0.9rem; letter-spacing: 0.5px;'>Created by Shivam</span></div>")
+            "<span style='color: #6EA2FF; font-weight: 600; font-size: 0.9rem; letter-spacing: 0.5px;'>Created by Shivam Chintawar</span></div>")
