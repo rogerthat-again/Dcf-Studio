@@ -188,13 +188,10 @@ section[data-testid="stSidebar"] .pill { font-size: .78rem; padding: .22rem .7re
   h4 { font-size: 1.15rem; }
   .ratios-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
   
-  /* --- MOBILE OPTIMIZATIONS (KEEP ANIMATIONS, REDUCE GPU LOAD) --- */
-  
   /* 1. Stop background pulse to save battery, keep static gradient */
   .stApp { animation: none !important; background-size: 100% 100% !important; }
 
-  /* 2. Hardware-Accelerate the SVG flow. 
-     This forces the phone's GPU to handle the flowing lines smoothly without repainting the whole screen. */
+  /* 2. Hardware-Accelerate the SVG flow. */
   .mesh .fl, .mesh .base path {
     will-change: transform, stroke-dashoffset;
     transform: translateZ(0);
@@ -202,11 +199,9 @@ section[data-testid="stSidebar"] .pill { font-size: .78rem; padding: .22rem .7re
 
   /* 3. Optimize the Glass Cards */
   .glass { 
-    /* Replace the heavy real-time blur with a high-opacity solid color */
     background: rgba(19, 26, 43, 0.90) !important; 
     backdrop-filter: none !important; 
     -webkit-backdrop-filter: none !important;
-    /* Keep the shadow for depth, but stop the continuous sway to save power */
     box-shadow: 0 10px 30px rgba(0,0,0,0.5) !important;
     animation: none !important; 
   }
@@ -218,15 +213,30 @@ section[data-testid="stSidebar"] .pill { font-size: .78rem; padding: .22rem .7re
     -webkit-backdrop-filter: none !important;
   }
 
-  /* 5. Keep the Entry Animations (rise, grow), but stop the "breathing" loops */
+  /* 5. Keep the Entry Animations, but stop the "breathing" loops */
   .card.sel, .stButton > button, .g-metrics b[data-count] {
     animation: none !important;
   }
   
-  /* 6. Remove hover transforms for touch screens (prevents sticky states) */
+  /* 6. Remove hover transforms for touch screens */
   .card:hover, .ratio-card:hover, .chip:hover, .stButton > button:hover, [data-testid="stLinkButton"] a:hover {
     transform: none !important; 
     box-shadow: none !important; 
+  }
+
+  /* 7. STOP HERO CARD FLICKERING ON LOAD */
+  .hero .rise {
+    animation: none !important;
+    opacity: 1 !important;
+    filter: none !important;
+    transform: none !important;
+  }
+  
+  .hero {
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
   }
 }
 </style>
