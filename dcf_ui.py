@@ -387,4 +387,5 @@ def footer_html() -> str:
     return ("<div class='foot'><b>DCF Studio</b><br>A learning project, not investment advice. A DCF is only as good as its "
             "assumptions. Financial ratios are calculated mathematically from raw statements to ensure 100% accuracy. "
             "Always cross-check important numbers on NSE or Screener.in before relying on them. "
-            "Not suitable for banks and financial companies.</div>")
+            "Not suitable for banks and financial companies.<br><br>"
+            "<span style='color: #6EA2FF; font-weight: 600; font-size: 0.9rem; letter-spacing: 0.5px;'>Created by Shivam</span></div>")
