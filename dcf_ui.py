@@ -177,11 +177,57 @@ section[data-testid="stSidebar"] .pill { font-size: .78rem; padding: .22rem .7re
 .news small { color: var(--muted); }
 .foot { background: #070B14; border: 1px solid var(--line); color: #8896B3; border-radius: 20px; padding: 1.5rem 1.7rem; margin-top: 2.2rem; font-size: .82rem; line-height: 1.8; }
 .foot b { color: var(--text); font-size: 1.1rem; }
+
+/* --- DESKTOP STYLES END HERE --- */
+
 @media (max-width: 768px) {
   .block-container { padding: .6rem .8rem 3rem; }
-  .hero-in { padding: 1.4rem .7rem 1.4rem; } .glass { padding: 1rem; }
-  .g-metrics b { font-size: 1.3rem; } .c-val { font-size: 2.2rem; } h4 { font-size: 1.15rem; }
+  .hero-in { padding: 1.4rem .7rem 1.4rem; } 
+  .g-metrics b { font-size: 1.3rem; } 
+  .c-val { font-size: 2.2rem; } 
+  h4 { font-size: 1.15rem; }
   .ratios-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  
+  /* --- MOBILE OPTIMIZATIONS (KEEP ANIMATIONS, REDUCE GPU LOAD) --- */
+  
+  /* 1. Stop background pulse to save battery, keep static gradient */
+  .stApp { animation: none !important; background-size: 100% 100% !important; }
+
+  /* 2. Hardware-Accelerate the SVG flow. 
+     This forces the phone's GPU to handle the flowing lines smoothly without repainting the whole screen. */
+  .mesh .fl, .mesh .base path {
+    will-change: transform, stroke-dashoffset;
+    transform: translateZ(0);
+  }
+
+  /* 3. Optimize the Glass Cards */
+  .glass { 
+    /* Replace the heavy real-time blur with a high-opacity solid color */
+    background: rgba(19, 26, 43, 0.90) !important; 
+    backdrop-filter: none !important; 
+    -webkit-backdrop-filter: none !important;
+    /* Keep the shadow for depth, but stop the continuous sway to save power */
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5) !important;
+    animation: none !important; 
+  }
+  
+  /* 4. Optimize the Ratio Cards and UI elements */
+  .ratio-card, .live, .pill, .chip, .brandpill {
+    background: rgba(26, 34, 56, 0.95) !important; 
+    backdrop-filter: none !important; 
+    -webkit-backdrop-filter: none !important;
+  }
+
+  /* 5. Keep the Entry Animations (rise, grow), but stop the "breathing" loops */
+  .card.sel, .stButton > button, .g-metrics b[data-count] {
+    animation: none !important;
+  }
+  
+  /* 6. Remove hover transforms for touch screens (prevents sticky states) */
+  .card:hover, .ratio-card:hover, .chip:hover, .stButton > button:hover, [data-testid="stLinkButton"] a:hover {
+    transform: none !important; 
+    box-shadow: none !important; 
+  }
 }
 </style>
 """
