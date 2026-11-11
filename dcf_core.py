@@ -1,6 +1,6 @@
 """
 dcf_core.py - data layer + valuation engine. 
-Audited for corporate actions, share count anomalies, and currency mismatches.
+Features a Normalization Engine to handle demergers and corporate actions.
 """
 from __future__ import annotations
 
@@ -79,7 +79,6 @@ def _safe_float(x, default=None):
 
 
 def _get_latest(df, names):
-    """Safely extracts the most recent annual value from a financial statement DataFrame."""
     if df is None or getattr(df, "empty", True):
         return None
     for n in names:
@@ -91,7 +90,6 @@ def _get_latest(df, names):
 
 
 def calculate_ratios(ticker, price: float | None, shares_out: float | None) -> dict:
-    """Calculates every ratio mathematically from raw statements to guarantee accuracy."""
     try:
         inc = ticker.financials
         bs = ticker.balance_sheet
@@ -208,7 +206,6 @@ def fetch_company(symbol: str) -> CompanyData:
         cd.sector = info.get("sector")
         cd.price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
         
-        # --- ANALYST FIX 1: SHARE COUNT CORRECTION ---
         yahoo_shares = _safe_float(info.get("sharesOutstanding"))
         if info.get("marketCap") and cd.price and cd.price > 0:
             cd.mcap_cr = _safe_float(info["marketCap"]) / CR
@@ -226,10 +223,9 @@ def fetch_company(symbol: str) -> CompanyData:
         cd.n_analysts = info.get("numberOfAnalystOpinions")
         cd.recommendation = info.get("recommendationKey")
         
-        # --- ANALYST FIX 2: CURRENCY MISMATCH CHECK ---
         fin_currency = info.get("financialCurrency", "INR")
         if fin_currency != "INR":
-            cd.warnings.append(f"CRITICAL WARNING: Financial statements are reported in {fin_currency}, but the share price is in INR. A standard DCF will produce wildly inaccurate results. Interpret with extreme caution.")
+            cd.warnings.append(f"CRITICAL WARNING: Financial statements are reported in {fin_currency}, but the share price is in INR. A standard DCF will produce wildly inaccurate results.")
 
         ratios = calculate_ratios(t, cd.price, cd.shares)
         cd.ratios = ratios
@@ -287,9 +283,8 @@ def fetch_company(symbol: str) -> CompanyData:
     except Exception as e:
         cd.warnings.append(f"Data fetch failed: {type(e).__name__}: {e}")
 
-    # --- ANALYST FIX 3: BANK WARNING (Does not stop calculation) ---
     if cd.sector and "financial" in cd.sector.lower():
-        cd.warnings.append("CRITICAL WARNING: This is a bank/financial company. A standard FCFF DCF is mathematically invalid for banks because debt is their core business operation, not a financing cost. Treat the valuation below with extreme caution.")
+        cd.warnings.append("CRITICAL WARNING: This is a bank/financial company. A standard FCFF DCF is mathematically invalid for banks.")
 
     return cd
 
@@ -314,15 +309,8 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
             cagr = (rev.iloc[-1] / rev.iloc[0]) ** (1 / (len(rev) - 1)) - 1
             yoy = rev.pct_change().dropna()
             median_yoy = yoy.median()
-            
-            # ANALYST FIX 4: Blend CAGR and Median to ignore anomalies (like demergers)
             blended_growth = (cagr * 0.4) + (median_yoy * 0.6)
             growth = float(np.clip(blended_growth, -0.15, 0.30))
-            
-            if yoy.min() < -0.20:
-                notes.append("WARNING: A massive revenue drop (>20%) was detected in the historical data. "
-                             "This could be due to a demerger, an acquisition, or a severe operational decline. "
-                             "The model used a smoothed median growth rate, but please review the inputs carefully.")
         elif len(rev) >= 2:
             growth = float(np.clip((rev.iloc[-1] / rev.iloc[0]) ** (1 / (len(rev) - 1)) - 1, -0.15, 0.30))
         else:
@@ -338,13 +326,31 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
     else:
         notes.append("Tax rate: no data found, default 25% used.")
 
+    ebit_margin = ratio("ebit", -0.1, 0.6, 0.15, "EBIT margin")
+    da_pct = ratio("da", 0.0, 0.3, 0.04, "D&A")
+    capex_pct = ratio("capex", 0.0, 0.15, 0.05, "Capex")
+
+    # --- NORMALIZATION ENGINE ---
+    # If a company has massive revenue (>10,000 cr) but historically broken margins or capex,
+    # it's likely due to a demerger or restructuring. We normalize the inputs.
+    if rev0 > 10000:
+        if ebit_margin < 0.05:
+            ebit_margin = 0.10
+            notes.append("Normalization Applied: Historical margin was extremely low (<5%), likely due to a demerger or one-off losses. Base case margin normalized to 10%.")
+        if capex_pct > 0.12:
+            capex_pct = 0.06
+            notes.append("Normalization Applied: Historical capex was extremely high (>12%), likely due to a major restructuring. Base case capex normalized to 6%.")
+        if growth < 0:
+            growth = 0.05
+            notes.append("Normalization Applied: Historical growth was negative, likely due to a demerger. Base case growth normalized to +5%.")
+
     basis = "last fiscal year"
     if cd.ttm_revenue_cr and cd.ttm_revenue_cr > 0:
         rev0, basis = cd.ttm_revenue_cr, "trailing 12 months"
         
     return {"revenue0": rev0, "revenue_basis": basis, "growth": growth,
-            "ebit_margin": ratio("ebit", -0.1, 0.6, 0.15, "EBIT margin"), "tax_rate": tax,
-            "da_pct": ratio("da", 0.0, 0.3, 0.04, "D&A"), "capex_pct": ratio("capex", 0.0, 0.15, 0.05, "Capex"),
+            "ebit_margin": ebit_margin, "tax_rate": tax,
+            "da_pct": da_pct, "capex_pct": capex_pct,
             "nwc_pct": 0.10}, notes
 
 
