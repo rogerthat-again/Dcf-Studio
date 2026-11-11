@@ -1,6 +1,7 @@
 """
 dcf_core.py - data layer + valuation engine. 
-Complete code with bounded Scenarios, AI Guidance Parser, and Safe Normalization.
+Now using bfinance (10+ years of Indian financials) instead of yfinance.
+Features AI Guidance Parser, Safe Normalization, and Source Transparency.
 """
 from __future__ import annotations
 
@@ -13,6 +14,9 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
+
+# --- THE KEY CHANGE: bfinance replaces yfinance ---
+import bfinance as yf 
 
 CR = 1e7
 
@@ -217,17 +221,13 @@ def _pick(df, names):
 def fetch_company(symbol: str) -> CompanyData:
     cd = CompanyData(symbol=symbol, name=symbol)
     try:
-        import yfinance as yf
-    except ImportError:
-        cd.warnings.append("yfinance is not installed.")
-        return cd
-    try:
-        t = yf.Ticker(f"{symbol}.NS")
+        # Using bfinance to fetch the ticker
+        t = yf.Ticker(symbol)
         info = {}
         try:
             info = t.info or {}
         except Exception:
-            cd.warnings.append("Yahoo company profile unavailable.")
+            cd.warnings.append("bfinance company profile unavailable.")
         cd.name = info.get("longName") or info.get("shortName") or symbol
         cd.sector = info.get("sector")
         cd.price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
@@ -241,7 +241,7 @@ def fetch_company(symbol: str) -> CompanyData:
             implied_shares = (cd.mcap_cr * CR) / cd.price
             if yahoo_shares is None or (abs(yahoo_shares - implied_shares) / implied_shares > 0.10):
                 cd.shares = implied_shares
-                cd.warnings.append("Yahoo's reported share count was severely mismatched with Market Cap. Corrected using implied shares.")
+                cd.warnings.append("bfinance's reported share count was severely mismatched with Market Cap. Corrected using implied shares.")
             else:
                 cd.shares = yahoo_shares
         else:
@@ -365,7 +365,7 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
             median_yoy = yoy.median()
             
             historical_growth = (cagr * 0.4) + (median_yoy * 0.6)
-            growth = float(np.clip(historical_growth, -0.20, 0.40)) # slightly wider bounds for auto-suggest
+            growth = float(np.clip(historical_growth, -0.20, 0.40))
             
             if yoy.min() < -0.20:
                 news_items = fetch_news(cd.name, limit=50, days=365)
@@ -392,15 +392,15 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
 
     capped_forward = None
     if cd.est_revenue_growth is not None and cd.est_revenue_growth > 0:
-        capped_forward = min(cd.est_revenue_growth, 0.20) # Cap at 20% max for auto-suggest
-        notes.append(f"📈 YAHOO FINANCE CONSENSUS: Forward revenue growth is {cd.est_revenue_growth:.1%}. (Capped at {capped_forward:.1%} for base case stability).")
+        capped_forward = min(cd.est_revenue_growth, 0.20)
+        notes.append(f"📈 B-FINANCE CONSENSUS: Forward revenue growth is {cd.est_revenue_growth:.1%}. (Capped at {capped_forward:.1%} for base case stability).")
 
     guidance_val, guidance_source = extract_guidance_from_news(cd)
     if guidance_val is not None:
-        forward_guidance = min(guidance_val, 0.20) # Cap at 20% max
+        forward_guidance = min(guidance_val, 0.20)
         notes.append(f"📰 AI GUIDANCE PARSER: Found explicit management guidance of {guidance_val:.1%} in recent news. (Capped at {forward_guidance:.1%}). {guidance_source}")
 
-    ebit_margin = ratio("ebit", -0.20, 0.60, 0.15, "EBIT margin") # Wider bounds for auto-suggest
+    ebit_margin = ratio("ebit", -0.20, 0.60, 0.15, "EBIT margin")
     da_pct = ratio("da", 0.0, 0.30, 0.04, "D&A")
     capex_pct = ratio("capex", 0.0, 0.25, 0.05, "Capex")
 
@@ -554,7 +554,6 @@ def sanity_checks(i: DCFInputs, r: dict) -> list[tuple[str, str]]:
     if i.terminal_growth > 0.06:
         out.append(("warn", "Terminal growth above 6% is hard to justify as a perpetual rate."))
         
-    # --- ADVISORY WARNINGS FOR EXTREME INPUTS ---
     if i.growth > 0.25:
         out.append(("warn", "ADVISORY: Revenue growth exceeds 25%. This is hyper-growth territory. Ensure this is supported by capacity expansion or market share gains."))
     if i.growth < -0.10:
@@ -580,7 +579,6 @@ SCENARIOS = {
 
 def apply_scenario(base: DCFInputs, name: str) -> DCFInputs:
     d = SCENARIOS[name]
-    # Removed hard mathematical bounds. The user's base assumptions dictate the scenario.
     return replace(base, growth=base.growth + d["growth"], ebit_margin=base.ebit_margin + d["ebit_margin"],
                    wacc=base.wacc + d["wacc"], terminal_growth=base.terminal_growth + d["terminal_growth"])
 
@@ -783,11 +781,11 @@ def data_checks(cd: CompanyData, price: float, shares_cr: float) -> list[tuple[s
     if cd.mcap_cr and price > 0 and shares_cr > 0:
         gap = price * shares_cr / cd.mcap_cr - 1
         if abs(gap) > 0.15:
-            out.append(("warn", f"Price x shares is {gap:+.0%} different from Yahoo's market cap "
+            out.append(("warn", f"Price x shares is {gap:+.0%} different from bfinance's market cap "
                                 f"(₹{cd.mcap_cr:,.0f} cr). The share count or price may be wrong: please check both "
                                 "against NSE or Screener."))
         else:
-            out.append(("ok", "Price x shares matches Yahoo's market cap, so the share count looks right."))
+            out.append(("ok", "Price x shares matches bfinance's market cap, so the share count looks right."))
     if cd.ttm_revenue_cr and "revenue" in cd.hist.columns and cd.hist["revenue"].notna().any():
         last = float(cd.hist["revenue"].dropna().iloc[-1])
         if last > 0 and abs(cd.ttm_revenue_cr / last - 1) > 0.5:
