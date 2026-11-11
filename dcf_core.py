@@ -1,6 +1,6 @@
 """
 dcf_core.py - data layer + valuation engine. 
-Complete code with AI Guidance Parser, Safe Normalization, and Source Transparency.
+Complete code with bounded Scenarios, AI Guidance Parser, and Safe Normalization.
 """
 from __future__ import annotations
 
@@ -332,7 +332,6 @@ def extract_guidance_from_news(cd: CompanyData) -> tuple[float | None, str]:
                 match = re.search(p, title)
                 if match:
                     val = float(match.group(1)) / 100.0
-                    # Return the value AND the exact headline for transparency
                     source = f"Source: '{item['title']}' ({item['source']}, {item['date']})"
                     return val, source
         return None, ""
@@ -365,8 +364,8 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
             yoy = rev.pct_change().dropna()
             median_yoy = yoy.median()
             
-            blended_growth = (cagr * 0.4) + (median_yoy * 0.6)
-            growth = float(np.clip(blended_growth, -0.15, 0.30))
+            historical_growth = (cagr * 0.4) + (median_yoy * 0.6)
+            growth = float(np.clip(historical_growth, -0.20, 0.40)) # slightly wider bounds for auto-suggest
             
             if yoy.min() < -0.20:
                 news_items = fetch_news(cd.name, limit=50, days=365)
@@ -385,52 +384,47 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
                 else:
                     notes.append("⚠️ AI ANALYSIS: A massive revenue drop was detected, but the news context is unclear. The model has smoothed the growth rate, but manual verification is required.")
         elif len(rev) >= 2:
-            growth = float(np.clip((rev.iloc[-1] / rev.iloc[0]) ** (1 / (len(rev) - 1)) - 1, -0.15, 0.30))
+            growth = float(np.clip((rev.iloc[-1] / rev.iloc[0]) ** (1 / (len(rev) - 1)) - 1, -0.20, 0.40))
         else:
             notes.append("Revenue growth: not enough history, default 10% used.")
     else:
         notes.append("Revenue: no data found, please enter it manually.")
 
-    # 1. First, try to extract explicit guidance from news
+    capped_forward = None
+    if cd.est_revenue_growth is not None and cd.est_revenue_growth > 0:
+        capped_forward = min(cd.est_revenue_growth, 0.20) # Cap at 20% max for auto-suggest
+        notes.append(f"📈 YAHOO FINANCE CONSENSUS: Forward revenue growth is {cd.est_revenue_growth:.1%}. (Capped at {capped_forward:.1%} for base case stability).")
+
     guidance_val, guidance_source = extract_guidance_from_news(cd)
     if guidance_val is not None:
-        forward_guidance = guidance_val
-        notes.append(f"📰 AI GUIDANCE PARSER: Found explicit management guidance of {forward_guidance:.1%} in recent news. {guidance_source}")
+        forward_guidance = min(guidance_val, 0.20) # Cap at 20% max
+        notes.append(f"📰 AI GUIDANCE PARSER: Found explicit management guidance of {guidance_val:.1%} in recent news. (Capped at {forward_guidance:.1%}). {guidance_source}")
 
-    # 2. Get consensus from Yahoo Finance
-    if cd.est_revenue_growth is not None and cd.est_revenue_growth > 0:
-        notes.append(f"📈 ANALYST CONSENSUS: Forward revenue growth is expected to be {cd.est_revenue_growth:.1%}.")
-
-    ebit_margin = ratio("ebit", -0.1, 0.6, 0.15, "EBIT margin")
-    da_pct = ratio("da", 0.0, 0.3, 0.04, "D&A")
+    ebit_margin = ratio("ebit", -0.20, 0.60, 0.15, "EBIT margin") # Wider bounds for auto-suggest
+    da_pct = ratio("da", 0.0, 0.30, 0.04, "D&A")
     capex_pct = ratio("capex", 0.0, 0.25, 0.05, "Capex")
 
-    # --- SMART NORMALIZATION LOGIC ---
     if is_demerger:
-        # If demerger, prioritize forward guidance/analyst estimates
-        if forward_guidance is not None and forward_guidance > 0:
-            growth = forward_guidance
-            notes.append(f"🛠️ NORMALIZATION ENGINE: Demerger detected, but using explicit management guidance of {growth:.1%} growth.")
-        elif cd.est_revenue_growth is not None and cd.est_revenue_growth > 0:
-            growth = cd.est_revenue_growth
-            notes.append(f"🛠️ NORMALIZATION ENGINE: Demerger detected, but using analyst consensus of {growth:.1%} growth.")
+        if forward_guidance is not None:
+            growth = min(forward_guidance, 0.15)
+            notes.append(f"🛠️ NORMALIZATION ENGINE: Demerger detected. Using management guidance capped at 15% for the new entity.")
+        elif capped_forward is not None:
+            growth = min(capped_forward, 0.15)
+            notes.append(f"🛠️ NORMALIZATION ENGINE: Demerger detected. Using analyst consensus capped at 15% for the new entity.")
         else:
             growth = 0.05
-            notes.append("🛠️ NORMALIZATION ENGINE: Because of the demerger, historical margins and capex were heavily distorted. Base case reset to 5% growth, 10% margin, and 6% capex.")
+            notes.append("🛠️ NORMALIZATION ENGINE: Because of the demerger, historical margins and capex were heavily distorted. Base case reset to 5% growth.")
         
-        # Keep margins safe
         ebit_margin = max(ebit_margin, 0.10)
         capex_pct = min(capex_pct, 0.06)
     else:
-        # No demerger, just use a blend of historical and forward
-        if forward_guidance is not None and forward_guidance > 0:
-            growth = (growth * 0.3) + (forward_guidance * 0.7)
-            notes.append(f"🛠️ MODEL ADJUSTMENT: Blended historical growth with management guidance to {growth:.1%}.")
-        elif cd.est_revenue_growth is not None and cd.est_revenue_growth > 0:
-            growth = (growth * 0.4) + (cd.est_revenue_growth * 0.6)
-            notes.append(f"🛠️ MODEL ADJUSTMENT: Blended historical growth with analyst consensus to {growth:.1%}.")
+        if forward_guidance is not None:
+            growth = (growth * 0.7) + (forward_guidance * 0.3)
+            notes.append(f"🛠️ MODEL ADJUSTMENT: Blended historical growth (70%) with management guidance (30%) to {growth:.1%}.")
+        elif capped_forward is not None:
+            growth = (growth * 0.7) + (capped_forward * 0.3)
+            notes.append(f"🛠️ MODEL ADJUSTMENT: Blended historical growth (70%) with analyst consensus (30%) to {growth:.1%}.")
 
-    # Prevent negative crashes from bad API data
     if ebit_margin < 0.01: ebit_margin = 0.05
     if growth < -0.05: growth = 0.02
 
@@ -559,18 +553,34 @@ def sanity_checks(i: DCFInputs, r: dict) -> list[tuple[str, str]]:
                             "investing less than it depreciates. Raise terminal capex to at least D&A."))
     if i.terminal_growth > 0.06:
         out.append(("warn", "Terminal growth above 6% is hard to justify as a perpetual rate."))
+        
+    # --- ADVISORY WARNINGS FOR EXTREME INPUTS ---
+    if i.growth > 0.25:
+        out.append(("warn", "ADVISORY: Revenue growth exceeds 25%. This is hyper-growth territory. Ensure this is supported by capacity expansion or market share gains."))
+    if i.growth < -0.10:
+        out.append(("warn", "ADVISORY: Revenue is contracting faster than 10%. Ensure this reflects a genuine structural decline, not a one-off event."))
+    if i.ebit_margin > 0.50:
+        out.append(("warn", "ADVISORY: EBIT margin exceeds 50%. This is exceptionally high. Verify against industry benchmarks."))
+    if i.ebit_margin < 0.0:
+        out.append(("warn", "ADVISORY: EBIT margin is negative. The company is currently loss-making."))
+    if i.wacc > 0.18:
+        out.append(("warn", "ADVISORY: WACC exceeds 18%. This implies very high risk. Verify the beta and risk-free rate."))
+    if i.wacc < 0.07:
+        out.append(("warn", "ADVISORY: WACC is below 7%. This is unusually low for an equity investment."))
+        
     return out or [("ok", "No red flags found in the main model checks.")]
 
 
 SCENARIOS = {
-    "Bear": dict(growth=-0.02, ebit_margin=-0.015, wacc=+0.005, terminal_growth=-0.005),
+    "Bear": dict(growth=-0.015, ebit_margin=-0.010, wacc=+0.010, terminal_growth=-0.005),
     "Base": dict(growth=0.0, ebit_margin=0.0, wacc=0.0, terminal_growth=0.0),
-    "Bull": dict(growth=+0.02, ebit_margin=+0.010, wacc=-0.005, terminal_growth=+0.005),
+    "Bull": dict(growth=+0.015, ebit_margin=+0.010, wacc=-0.010, terminal_growth=+0.005),
 }
 
 
 def apply_scenario(base: DCFInputs, name: str) -> DCFInputs:
     d = SCENARIOS[name]
+    # Removed hard mathematical bounds. The user's base assumptions dictate the scenario.
     return replace(base, growth=base.growth + d["growth"], ebit_margin=base.ebit_margin + d["ebit_margin"],
                    wacc=base.wacc + d["wacc"], terminal_growth=base.terminal_growth + d["terminal_growth"])
 
@@ -792,7 +802,8 @@ def verify_links(symbol: str) -> list[tuple[str, str]]:
     return [("Google Finance", f"https://www.google.com/finance/quote/{symbol}:NSE"),
             ("Screener.in", f"https://www.screener.in/company/{symbol}/"),
             ("NSE India", f"https://www.nseindia.com/get-quotes/equity?symbol={symbol}"),
-            ("Yahoo Finance", f"https://finance.yahoo.com/quote/{symbol}.NS")]
+            ("Yahoo Finance", f"https://finance.yahoo.com/quote/{symbol}.NS"),
+            ("Yahoo Analysis", f"https://finance.yahoo.com/quote/{symbol}.NS/analysis")]
 
 
 def gap_sentence(ours: float, ref: float, ref_name: str) -> str:
