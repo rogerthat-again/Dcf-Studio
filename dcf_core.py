@@ -1,6 +1,6 @@
 """
 dcf_core.py - data layer + valuation engine. 
-Features AI Anomaly Detection, Expanded Valuation Metrics, and Analyst Safeguards.
+Features AI Anomaly Detection, Normalization Engine, and Expanded Valuation Metrics.
 """
 from __future__ import annotations
 
@@ -326,6 +326,8 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
         return default
 
     growth, rev0 = 0.10, 0.0
+    is_demerger = False # Flag for the normalization engine
+    
     if "revenue" in h.columns and h["revenue"].notna().any():
         rev = h["revenue"].dropna()
         rev0 = float(rev.iloc[-1])
@@ -346,12 +348,13 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
                 demerger_words = ["demerger", "spin-off", "spin off", "scheme of arrangement", "hiving off", "merger"]
                 distress_words = ["loss", "fraud", "penalty", "market share", "probe", "downgrade", "ban", "slump", "decline"]
                 
-                is_demerger = any(w in titles for w in demerger_words)
-                is_distress = any(w in titles for w in distress_words)
+                is_dem = any(w in titles for w in demerger_words)
+                is_dis = any(w in titles for w in distress_words)
                 
-                if is_demerger:
-                    notes.append("🤖 AI ANALYSIS: A massive revenue drop was detected, and recent news confirms a demerger/restructuring. The model has automatically smoothed the historical growth rate to reflect the new entity.")
-                elif is_distress:
+                if is_dem:
+                    is_demerger = True
+                    notes.append("🤖 AI ANALYSIS: A massive revenue drop was detected, and recent news confirms a demerger/restructuring. The model has automatically normalized the assumptions to reflect the new entity.")
+                elif is_dis:
                     notes.append("🚨 AI ANALYSIS: A massive revenue drop was detected, and recent news points to operational distress (losses/penalties). The model has not artificially inflated the growth rate. Please review the assumptions.")
                 else:
                     notes.append("⚠️ AI ANALYSIS: A massive revenue drop was detected, but the news context is unclear. The model has smoothed the growth rate, but manual verification is required.")
@@ -374,7 +377,15 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
     da_pct = ratio("da", 0.0, 0.3, 0.04, "D&A")
     capex_pct = ratio("capex", 0.0, 0.25, 0.05, "Capex")
 
-    if ebit_margin < 0.02 and rev0 > 1000:
+    # --- NORMALIZATION OVERRIDE ---
+    # If a demerger is confirmed by AI, historical margins/capex are likely broken.
+    # We force realistic numbers for the new entity.
+    if is_demerger:
+        growth = 0.05
+        ebit_margin = 0.10
+        capex_pct = 0.06
+        notes.append("🛠️ NORMALIZATION ENGINE: Because of the demerger, historical margins and capex were heavily distorted. Base case reset to 5% growth, 10% margin, and 6% capex.")
+    elif ebit_margin < 0.02 and rev0 > 1000:
         notes.append("WARNING: The historical EBIT margin is extremely low (<2%). This is likely due to a recent demerger, one-off losses, or a capital-intensive phase.")
 
     basis = "last fiscal year"
