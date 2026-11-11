@@ -1,6 +1,6 @@
 """
 dcf_core.py - data layer + valuation engine. 
-Features Forward-Looking Consensus, AI Guidance Parser, and Normalization Engine.
+Complete code with AI Guidance Parser, Safe Normalization, and Expanded Metrics.
 """
 from __future__ import annotations
 
@@ -137,7 +137,6 @@ def calculate_ratios(ticker, price: float | None, shares_out: float | None) -> d
     capital_employed = (total_assets - curr_liab) if (total_assets is not None and curr_liab is not None) else None
     roce = (ebit / capital_employed) if (ebit is not None and capital_employed and capital_employed > 0) else None
 
-    # --- Expanded Valuation Metrics ---
     eps = _safe_float(ticker.info.get("trailingEps"))
     pe = (price / eps) if (price and eps and eps > 0) else None
     
@@ -191,7 +190,6 @@ class CompanyData:
     ratios: dict = field(default_factory=dict)
     ratio_source: str = ""
     
-    # Forward Looking Estimates
     est_revenue_growth: float | None = None
     est_earnings_growth: float | None = None
 
@@ -234,11 +232,9 @@ def fetch_company(symbol: str) -> CompanyData:
         cd.sector = info.get("sector")
         cd.price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
         
-        # Forward Looking Consensus
         cd.est_revenue_growth = _safe_float(info.get("revenueGrowth"))
         cd.est_earnings_growth = _safe_float(info.get("earningsGrowth"))
 
-        # Share count override
         yahoo_shares = _safe_float(info.get("sharesOutstanding"))
         if info.get("marketCap") and cd.price and cd.price > 0:
             cd.mcap_cr = _safe_float(info["marketCap"]) / CR
@@ -323,24 +319,18 @@ def fetch_company(symbol: str) -> CompanyData:
 
 
 def extract_guidance_from_news(cd: CompanyData) -> tuple[float | None, str]:
-    """Scans the last year of news for management guidance phrases."""
     try:
         news_items = fetch_news(cd.name, limit=50, days=365)
         titles = " ".join([n["title"].lower() for n in news_items])
-        
-        # Look for phrases like "expects 12% growth", "guidance of 15%", "targets 8%"
-        # We use regex to find a number followed by % and near growth/guidance words
         patterns = [
             r"(?:expects|guides|guidance|targets|forecast[s]?)\s+(?:for\s+)?(?:about\s+)?(\d{1,2}(?:\.\d)?)\s*%\s*(?:revenue|sales)?\s*growth",
             r"(?:expects|guides|guidance|targets|forecast[s]?)\s+(?:for\s+)?(?:about\s+)?(\d{1,2}(?:\.\d)?)\s*%\s*(?:margin|profit)"
         ]
-        
         for p in patterns:
             match = re.search(p, titles)
             if match:
                 val = float(match.group(1)) / 100.0
                 return val, f"Found explicit management guidance of {val:.1%} in recent news."
-                
         return None, ""
     except Exception:
         return None, ""
@@ -361,7 +351,6 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
     is_demerger = False
     forward_guidance = None
     
-    # 1. Historical Calculation
     if "revenue" in h.columns and h["revenue"].notna().any():
         rev = h["revenue"].dropna()
         rev0 = float(rev.iloc[-1])
@@ -397,42 +386,37 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
     else:
         notes.append("Revenue: no data found, please enter it manually.")
 
-    # 2. AI Guidance Extraction
     guidance_val, guidance_msg = extract_guidance_from_news(cd)
     if guidance_val is not None:
         forward_guidance = guidance_val
         notes.append(f"📰 NEWS GUIDANCE: {guidance_msg}")
 
-    # 3. Forward Consensus (Yahoo Finance)
     if cd.est_revenue_growth is not None and cd.est_revenue_growth > 0:
         notes.append(f"📈 ANALYST CONSENSUS: Forward revenue growth is expected to be {cd.est_revenue_growth:.1%}.")
 
-    # 4. Normalization Engine & Final Selection
     ebit_margin = ratio("ebit", -0.1, 0.6, 0.15, "EBIT margin")
     da_pct = ratio("da", 0.0, 0.3, 0.04, "D&A")
     capex_pct = ratio("capex", 0.0, 0.25, 0.05, "Capex")
 
+    # --- SAFE NORMALIZATION LOGIC ---
     if is_demerger:
-        if forward_guidance is not None:
-            growth = forward_guidance
-            notes.append(f"🛠️ NORMALIZATION ENGINE: Using news guidance of {growth:.1%} growth for the new entity.")
-        elif cd.est_revenue_growth is not None and cd.est_revenue_growth > 0:
-            growth = cd.est_revenue_growth
-            notes.append(f"🛠️ NORMALIZATION ENGINE: Using analyst consensus of {growth:.1%} growth for the new entity.")
-        else:
-            growth = 0.05
-            notes.append("🛠️ NORMALIZATION ENGINE: Because of the demerger, historical margins and capex were heavily distorted. Base case reset to 5% growth, 10% margin, and 6% capex.")
-        
+        # For demergers, YF data is broken. We absolutely force a safe baseline.
+        growth = 0.05
         ebit_margin = max(ebit_margin, 0.10)
         capex_pct = min(capex_pct, 0.06)
+        notes.append("🛠️ NORMALIZATION ENGINE: Because of the demerger, historical margins and capex were heavily distorted. Base case reset to 5% growth, 10% margin, and 6% capex.")
     else:
-        # If no demerger, but we have forward guidance, we blend it with historical
-        if forward_guidance is not None:
-            growth = (growth * 0.3) + (forward_guidance * 0.7)  # Weighted heavily towards management
+        # Only use forward guidance if it is POSITIVE (API data is often garbage)
+        if forward_guidance is not None and forward_guidance > 0:
+            growth = (growth * 0.3) + (forward_guidance * 0.7)
             notes.append(f"🛠️ MODEL ADJUSTMENT: Blended historical growth with management guidance to {growth:.1%}.")
         elif cd.est_revenue_growth is not None and cd.est_revenue_growth > 0:
-            growth = (growth * 0.4) + (cd.est_revenue_growth * 0.6)  # Weighted towards analyst consensus
+            growth = (growth * 0.4) + (cd.est_revenue_growth * 0.6)
             notes.append(f"🛠️ MODEL ADJUSTMENT: Blended historical growth with analyst consensus to {growth:.1%}.")
+
+    # Prevent negative crashes from bad API data
+    if ebit_margin < 0.01: ebit_margin = 0.05
+    if growth < -0.05: growth = 0.02
 
     tax = 0.25
     if {"tax", "pretax"} <= set(h.columns):
