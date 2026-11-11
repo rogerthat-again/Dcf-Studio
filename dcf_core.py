@@ -1,6 +1,6 @@
 """
 dcf_core.py - data layer + valuation engine. 
-Features a Normalization Engine to handle demergers and corporate actions.
+Features AI Anomaly Detection, Expanded Valuation Metrics, and Analyst Safeguards.
 """
 from __future__ import annotations
 
@@ -90,9 +90,11 @@ def _get_latest(df, names):
 
 
 def calculate_ratios(ticker, price: float | None, shares_out: float | None) -> dict:
+    """Calculates expanded valuation metrics from raw statements."""
     try:
         inc = ticker.financials
         bs = ticker.balance_sheet
+        cf = ticker.cashflow
     except Exception:
         return {"source": "Calculation Failed"}
 
@@ -104,7 +106,12 @@ def calculate_ratios(ticker, price: float | None, shares_out: float | None) -> d
     curr_assets = _get_latest(bs, ["Current Assets", "Total Current Assets"])
     curr_liab = _get_latest(bs, ["Current Liabilities", "Total Current Liabilities"])
     total_debt = _get_latest(bs, ["Total Debt"])
+    cash = _get_latest(bs, ["Cash Cash Equivalents And Short Term Investments", "Cash And Cash Equivalents"])
     equity = _get_latest(bs, ["Stockholders Equity", "Total Equity Gross Minority Interest"])
+    
+    op_cash = _get_latest(cf, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"])
+    capex = _get_latest(cf, ["Capital Expenditure", "Purchase Of PPE"])
+    capex = abs(capex) if capex is not None else 0
 
     div_yield = None
     try:
@@ -130,17 +137,34 @@ def calculate_ratios(ticker, price: float | None, shares_out: float | None) -> d
     capital_employed = (total_assets - curr_liab) if (total_assets is not None and curr_liab is not None) else None
     roce = (ebit / capital_employed) if (ebit is not None and capital_employed and capital_employed > 0) else None
 
+    # --- Expanded Valuation Metrics ---
     eps = _safe_float(ticker.info.get("trailingEps"))
     pe = (price / eps) if (price and eps and eps > 0) else None
     
     book_value = (equity / shares_out) if (equity is not None and shares_out and shares_out > 0) else None
     pb = (price / book_value) if (price and book_value and book_value > 0) else None
+    
+    mcap = price * shares_out if (price and shares_out) else None
+    ps = (mcap / revenue) if (mcap and revenue and revenue > 0) else None
+    
+    ev = (mcap + (total_debt or 0) - (cash or 0)) if mcap else None
+    ev_ebit = (ev / ebit) if (ev and ebit and ebit > 0) else None
+    
+    fcf = (op_cash - capex) if op_cash is not None else None
+    fcf_yield = (fcf / mcap) if (fcf and mcap and mcap > 0) else None
+    
+    peg = None
+    if pe and ticker.info.get("earningsGrowth") and ticker.info["earningsGrowth"] > 0:
+        peg = pe / (ticker.info["earningsGrowth"] * 100)
+    elif pe and ticker.info.get("pegRatio"):
+        peg = _safe_float(ticker.info["pegRatio"])
 
     return {
         "source": "Statements",
         "roe": roe, "roce": roce, "opm": opm, "npm": npm,
         "debt_to_equity": de, "current_ratio": cr,
         "pe_ratio": pe, "pb_ratio": pb, "div_yield": div_yield,
+        "ps_ratio": ps, "ev_ebit": ev_ebit, "fcf_yield": fcf_yield, "peg": peg,
     }
 
 
@@ -206,6 +230,7 @@ def fetch_company(symbol: str) -> CompanyData:
         cd.sector = info.get("sector")
         cd.price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
         
+        # Share count override
         yahoo_shares = _safe_float(info.get("sharesOutstanding"))
         if info.get("marketCap") and cd.price and cd.price > 0:
             cd.mcap_cr = _safe_float(info["marketCap"]) / CR
@@ -225,7 +250,7 @@ def fetch_company(symbol: str) -> CompanyData:
         
         fin_currency = info.get("financialCurrency", "INR")
         if fin_currency != "INR":
-            cd.warnings.append(f"CRITICAL WARNING: Financial statements are reported in {fin_currency}, but the share price is in INR. A standard DCF will produce wildly inaccurate results.")
+            cd.warnings.append(f"CRITICAL WARNING: Financial statements are reported in {fin_currency}. A standard DCF will produce wildly inaccurate results.")
 
         ratios = calculate_ratios(t, cd.price, cd.shares)
         cd.ratios = ratios
@@ -309,8 +334,27 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
             cagr = (rev.iloc[-1] / rev.iloc[0]) ** (1 / (len(rev) - 1)) - 1
             yoy = rev.pct_change().dropna()
             median_yoy = yoy.median()
+            
             blended_growth = (cagr * 0.4) + (median_yoy * 0.6)
             growth = float(np.clip(blended_growth, -0.15, 0.30))
+            
+            if yoy.min() < -0.20:
+                # CONTEXTUAL AI ANOMALY DETECTION (1-YEAR LOOKBACK)
+                news_items = fetch_news(cd.name, limit=50, days=365)
+                titles = " ".join([n["title"].lower() for n in news_items])
+                
+                demerger_words = ["demerger", "spin-off", "spin off", "scheme of arrangement", "hiving off", "merger"]
+                distress_words = ["loss", "fraud", "penalty", "market share", "probe", "downgrade", "ban", "slump", "decline"]
+                
+                is_demerger = any(w in titles for w in demerger_words)
+                is_distress = any(w in titles for w in distress_words)
+                
+                if is_demerger:
+                    notes.append("🤖 AI ANALYSIS: A massive revenue drop was detected, and recent news confirms a demerger/restructuring. The model has automatically smoothed the historical growth rate to reflect the new entity.")
+                elif is_distress:
+                    notes.append("🚨 AI ANALYSIS: A massive revenue drop was detected, and recent news points to operational distress (losses/penalties). The model has not artificially inflated the growth rate. Please review the assumptions.")
+                else:
+                    notes.append("⚠️ AI ANALYSIS: A massive revenue drop was detected, but the news context is unclear. The model has smoothed the growth rate, but manual verification is required.")
         elif len(rev) >= 2:
             growth = float(np.clip((rev.iloc[-1] / rev.iloc[0]) ** (1 / (len(rev) - 1)) - 1, -0.15, 0.30))
         else:
@@ -328,21 +372,10 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
 
     ebit_margin = ratio("ebit", -0.1, 0.6, 0.15, "EBIT margin")
     da_pct = ratio("da", 0.0, 0.3, 0.04, "D&A")
-    capex_pct = ratio("capex", 0.0, 0.15, 0.05, "Capex")
+    capex_pct = ratio("capex", 0.0, 0.25, 0.05, "Capex")
 
-    # --- NORMALIZATION ENGINE ---
-    # If a company has massive revenue (>10,000 cr) but historically broken margins or capex,
-    # it's likely due to a demerger or restructuring. We normalize the inputs.
-    if rev0 > 10000:
-        if ebit_margin < 0.05:
-            ebit_margin = 0.10
-            notes.append("Normalization Applied: Historical margin was extremely low (<5%), likely due to a demerger or one-off losses. Base case margin normalized to 10%.")
-        if capex_pct > 0.12:
-            capex_pct = 0.06
-            notes.append("Normalization Applied: Historical capex was extremely high (>12%), likely due to a major restructuring. Base case capex normalized to 6%.")
-        if growth < 0:
-            growth = 0.05
-            notes.append("Normalization Applied: Historical growth was negative, likely due to a demerger. Base case growth normalized to +5%.")
+    if ebit_margin < 0.02 and rev0 > 1000:
+        notes.append("WARNING: The historical EBIT margin is extremely low (<2%). This is likely due to a recent demerger, one-off losses, or a capital-intensive phase.")
 
     basis = "last fiscal year"
     if cd.ttm_revenue_cr and cd.ttm_revenue_cr > 0:
@@ -595,12 +628,12 @@ def tag_headline(title: str) -> str:
     return "bull" if b > d else "bear" if d > b else "neutral"
 
 
-def fetch_news(name: str, limit: int = 15) -> list[dict]:
+def fetch_news(name: str, limit: int = 15, days: int = 30) -> list[dict]:
     try:
         import xml.etree.ElementTree as ET
         import requests
         short = re.sub(r"\b(limited|ltd\.?|corporation|corp\.?)\b", "", name, flags=re.I).strip()
-        url = (f"https://news.google.com/rss/search?q={quote(short + ' stock when:30d')}"
+        url = (f"https://news.google.com/rss/search?q={quote(short + ' stock when:' + str(days) + 'd')}"
                "&hl=en-IN&gl=IN&ceid=IN:en")
         r = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
