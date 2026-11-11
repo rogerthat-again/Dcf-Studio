@@ -1,6 +1,6 @@
 """
 dcf_core.py - data layer + valuation engine. 
-Complete code with AI Guidance Parser, Safe Normalization, and Expanded Metrics.
+Complete code with AI Guidance Parser, Safe Normalization, and Source Transparency.
 """
 from __future__ import annotations
 
@@ -319,18 +319,22 @@ def fetch_company(symbol: str) -> CompanyData:
 
 
 def extract_guidance_from_news(cd: CompanyData) -> tuple[float | None, str]:
+    """Scans the last year of news for management guidance phrases and returns the exact source."""
     try:
         news_items = fetch_news(cd.name, limit=50, days=365)
-        titles = " ".join([n["title"].lower() for n in news_items])
         patterns = [
-            r"(?:expects|guides|guidance|targets|forecast[s]?)\s+(?:for\s+)?(?:about\s+)?(\d{1,2}(?:\.\d)?)\s*%\s*(?:revenue|sales)?\s*growth",
-            r"(?:expects|guides|guidance|targets|forecast[s]?)\s+(?:for\s+)?(?:about\s+)?(\d{1,2}(?:\.\d)?)\s*%\s*(?:margin|profit)"
+            r"(?:expects|expect|guides|guidance|targets|target|aims|forecast[s]?|project[s]?|estimates)\s+(?:for\s+)?(?:about\s+)?(\d{1,2}(?:\.\d)?)\s*%\s*(?:revenue|sales|topline)?\s*(?:growth|cagr|increase)",
+            r"(?:expects|expect|guides|guidance|targets|target|aims|forecast[s]?|project[s]?|estimates)\s+(?:for\s+)?(?:about\s+)?(\d{1,2}(?:\.\d)?)\s*%\s*(?:margin|ebitda|profit)"
         ]
         for p in patterns:
-            match = re.search(p, titles)
-            if match:
-                val = float(match.group(1)) / 100.0
-                return val, f"Found explicit management guidance of {val:.1%} in recent news."
+            for item in news_items:
+                title = item["title"].lower()
+                match = re.search(p, title)
+                if match:
+                    val = float(match.group(1)) / 100.0
+                    # Return the value AND the exact headline for transparency
+                    source = f"Source: '{item['title']}' ({item['source']}, {item['date']})"
+                    return val, source
         return None, ""
     except Exception:
         return None, ""
@@ -350,6 +354,7 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
     growth, rev0 = 0.10, 0.0
     is_demerger = False
     forward_guidance = None
+    guidance_source = ""
     
     if "revenue" in h.columns and h["revenue"].notna().any():
         rev = h["revenue"].dropna()
@@ -386,11 +391,13 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
     else:
         notes.append("Revenue: no data found, please enter it manually.")
 
-    guidance_val, guidance_msg = extract_guidance_from_news(cd)
+    # 1. First, try to extract explicit guidance from news
+    guidance_val, guidance_source = extract_guidance_from_news(cd)
     if guidance_val is not None:
         forward_guidance = guidance_val
-        notes.append(f"📰 NEWS GUIDANCE: {guidance_msg}")
+        notes.append(f"📰 AI GUIDANCE PARSER: Found explicit management guidance of {forward_guidance:.1%} in recent news. {guidance_source}")
 
+    # 2. Get consensus from Yahoo Finance
     if cd.est_revenue_growth is not None and cd.est_revenue_growth > 0:
         notes.append(f"📈 ANALYST CONSENSUS: Forward revenue growth is expected to be {cd.est_revenue_growth:.1%}.")
 
@@ -398,15 +405,24 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
     da_pct = ratio("da", 0.0, 0.3, 0.04, "D&A")
     capex_pct = ratio("capex", 0.0, 0.25, 0.05, "Capex")
 
-    # --- SAFE NORMALIZATION LOGIC ---
+    # --- SMART NORMALIZATION LOGIC ---
     if is_demerger:
-        # For demergers, YF data is broken. We absolutely force a safe baseline.
-        growth = 0.05
+        # If demerger, prioritize forward guidance/analyst estimates
+        if forward_guidance is not None and forward_guidance > 0:
+            growth = forward_guidance
+            notes.append(f"🛠️ NORMALIZATION ENGINE: Demerger detected, but using explicit management guidance of {growth:.1%} growth.")
+        elif cd.est_revenue_growth is not None and cd.est_revenue_growth > 0:
+            growth = cd.est_revenue_growth
+            notes.append(f"🛠️ NORMALIZATION ENGINE: Demerger detected, but using analyst consensus of {growth:.1%} growth.")
+        else:
+            growth = 0.05
+            notes.append("🛠️ NORMALIZATION ENGINE: Because of the demerger, historical margins and capex were heavily distorted. Base case reset to 5% growth, 10% margin, and 6% capex.")
+        
+        # Keep margins safe
         ebit_margin = max(ebit_margin, 0.10)
         capex_pct = min(capex_pct, 0.06)
-        notes.append("🛠️ NORMALIZATION ENGINE: Because of the demerger, historical margins and capex were heavily distorted. Base case reset to 5% growth, 10% margin, and 6% capex.")
     else:
-        # Only use forward guidance if it is POSITIVE (API data is often garbage)
+        # No demerger, just use a blend of historical and forward
         if forward_guidance is not None and forward_guidance > 0:
             growth = (growth * 0.3) + (forward_guidance * 0.7)
             notes.append(f"🛠️ MODEL ADJUSTMENT: Blended historical growth with management guidance to {growth:.1%}.")
