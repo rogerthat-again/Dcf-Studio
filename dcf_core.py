@@ -1,5 +1,6 @@
 """
-dcf_core.py - data layer + valuation engine. Ratios are mathematically calculated from raw statements.
+dcf_core.py - data layer + valuation engine. 
+Audited for corporate actions, share count anomalies, and currency mismatches.
 """
 from __future__ import annotations
 
@@ -85,7 +86,7 @@ def _get_latest(df, names):
         if n in df.index:
             s = pd.to_numeric(df.loc[n], errors="coerce").dropna()
             if len(s):
-                return float(s.iloc[0])  # Most recent year is usually the first column
+                return float(s.iloc[0])
     return None
 
 
@@ -97,7 +98,6 @@ def calculate_ratios(ticker, price: float | None, shares_out: float | None) -> d
     except Exception:
         return {"source": "Calculation Failed"}
 
-    # --- Raw Data Extraction ---
     revenue = _get_latest(inc, ["Total Revenue", "Operating Revenue"])
     ebit = _get_latest(inc, ["EBIT", "Operating Income"])
     net_income = _get_latest(inc, ["Net Income", "Net Income Common Stockholders"])
@@ -108,7 +108,6 @@ def calculate_ratios(ticker, price: float | None, shares_out: float | None) -> d
     total_debt = _get_latest(bs, ["Total Debt"])
     equity = _get_latest(bs, ["Stockholders Equity", "Total Equity Gross Minority Interest"])
 
-    # --- Dividend Yield (Mathematical) ---
     div_yield = None
     try:
         divs = ticker.dividends
@@ -123,7 +122,6 @@ def calculate_ratios(ticker, price: float | None, shares_out: float | None) -> d
     except Exception:
         pass
 
-    # --- Calculations ---
     roe = (net_income / equity) if (net_income is not None and equity and equity > 0) else None
     opm = (ebit / revenue) if (ebit is not None and revenue and revenue > 0) else None
     npm = (net_income / revenue) if (net_income is not None and revenue and revenue > 0) else None
@@ -131,11 +129,9 @@ def calculate_ratios(ticker, price: float | None, shares_out: float | None) -> d
     de = (total_debt / equity) if (total_debt is not None and equity and equity > 0) else None
     cr = (curr_assets / curr_liab) if (curr_assets is not None and curr_liab and curr_liab > 0) else None
     
-    # ROCE = EBIT / (Total Assets - Current Liabilities)
     capital_employed = (total_assets - curr_liab) if (total_assets is not None and curr_liab is not None) else None
     roce = (ebit / capital_employed) if (ebit is not None and capital_employed and capital_employed > 0) else None
 
-    # Valuation Multiples
     eps = _safe_float(ticker.info.get("trailingEps"))
     pe = (price / eps) if (price and eps and eps > 0) else None
     
@@ -144,15 +140,9 @@ def calculate_ratios(ticker, price: float | None, shares_out: float | None) -> d
 
     return {
         "source": "Statements",
-        "roe": roe,
-        "roce": roce,
-        "opm": opm,
-        "npm": npm,
-        "debt_to_equity": de,
-        "current_ratio": cr,
-        "pe_ratio": pe,
-        "pb_ratio": pb,
-        "div_yield": div_yield,
+        "roe": roe, "roce": roce, "opm": opm, "npm": npm,
+        "debt_to_equity": de, "current_ratio": cr,
+        "pe_ratio": pe, "pb_ratio": pb, "div_yield": div_yield,
     }
 
 
@@ -176,7 +166,6 @@ class CompanyData:
     hist: pd.DataFrame = field(default_factory=pd.DataFrame)
     range52: tuple | None = None
     warnings: list = field(default_factory=list)
-    
     ratios: dict = field(default_factory=dict)
     ratio_source: str = ""
 
@@ -218,21 +207,34 @@ def fetch_company(symbol: str) -> CompanyData:
         cd.name = info.get("longName") or info.get("shortName") or symbol
         cd.sector = info.get("sector")
         cd.price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
-        cd.shares = _safe_float(info.get("sharesOutstanding"))
+        
+        # --- ANALYST FIX 1: SHARE COUNT CORRECTION ---
+        yahoo_shares = _safe_float(info.get("sharesOutstanding"))
+        if info.get("marketCap") and cd.price and cd.price > 0:
+            cd.mcap_cr = _safe_float(info["marketCap"]) / CR
+            implied_shares = (cd.mcap_cr * CR) / cd.price
+            if yahoo_shares is None or (abs(yahoo_shares - implied_shares) / implied_shares > 0.10):
+                cd.shares = implied_shares
+                cd.warnings.append("Yahoo's reported share count was severely mismatched with Market Cap. Corrected using implied shares.")
+            else:
+                cd.shares = yahoo_shares
+        else:
+            cd.shares = yahoo_shares
+
         cd.beta = _safe_float(info.get("beta"))
         cd.eps = _safe_float(info.get("trailingEps"))
-        if info.get("marketCap"):
-            m = _safe_float(info["marketCap"])
-            cd.mcap_cr = m / CR if m else None
         cd.n_analysts = info.get("numberOfAnalystOpinions")
         cd.recommendation = info.get("recommendationKey")
         
-        # --- Fetch mathematically verified ratios ---
+        # --- ANALYST FIX 2: CURRENCY MISMATCH CHECK ---
+        fin_currency = info.get("financialCurrency", "INR")
+        if fin_currency != "INR":
+            cd.warnings.append(f"CRITICAL WARNING: Financial statements are reported in {fin_currency}, but the share price is in INR. A standard DCF will produce wildly inaccurate results. Interpret with extreme caution.")
+
         ratios = calculate_ratios(t, cd.price, cd.shares)
         cd.ratios = ratios
         cd.ratio_source = ratios.get("source", "Statements")
 
-        # --- Targets & Ranges ---
         tl, tm, th = (info.get(k) for k in ("targetLowPrice", "targetMeanPrice", "targetHighPrice"))
         if all(tl and tm and th and _safe_float(v) is not None for v in (tl, tm, th)):
             cd.targets = (_safe_float(tl), _safe_float(tm), _safe_float(th))
@@ -245,7 +247,6 @@ def fetch_company(symbol: str) -> CompanyData:
         except Exception:
             pass
 
-        # --- Financial Statements (for DCF) ---
         inc, bs, cf = t.financials, t.balance_sheet, t.cashflow
         da = _pick(cf, ["Depreciation And Amortization", "Depreciation Amortization Depletion"])
         if da is None:
@@ -286,9 +287,10 @@ def fetch_company(symbol: str) -> CompanyData:
     except Exception as e:
         cd.warnings.append(f"Data fetch failed: {type(e).__name__}: {e}")
 
+    # --- ANALYST FIX 3: BANK WARNING (Does not stop calculation) ---
     if cd.sector and "financial" in cd.sector.lower():
-        cd.warnings.append("Banks/financial companies: debt is part of their business, so a standard "
-                           "FCFF DCF is not reliable here. Treat the result with great caution.")
+        cd.warnings.append("CRITICAL WARNING: This is a bank/financial company. A standard FCFF DCF is mathematically invalid for banks because debt is their core business operation, not a financing cost. Treat the valuation below with extreme caution.")
+
     return cd
 
 
@@ -297,7 +299,7 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
 
     def ratio(col, lo, hi, default, label):
         if col in h.columns and "revenue" in h.columns:
-            r = (h[col] / h["revenue"]).replace([np.inf, -np.inf], np.nan).dropna()
+            r = (h[col] / h["revenue"]).replace([np.inf, -np.inf], np.nan).dropna().tail(3)
             if len(r):
                 return float(np.clip(r.mean(), lo, hi))
         notes.append(f"{label}: no data found, default {default:.0%} used.")
@@ -307,8 +309,22 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
     if "revenue" in h.columns and h["revenue"].notna().any():
         rev = h["revenue"].dropna()
         rev0 = float(rev.iloc[-1])
-        if len(rev) >= 2 and rev.iloc[0] > 0 and rev.iloc[-1] > 0:
-            growth = float(np.clip((rev.iloc[-1] / rev.iloc[0]) ** (1 / (len(rev) - 1)) - 1, -0.05, 0.30))
+        
+        if len(rev) >= 3:
+            cagr = (rev.iloc[-1] / rev.iloc[0]) ** (1 / (len(rev) - 1)) - 1
+            yoy = rev.pct_change().dropna()
+            median_yoy = yoy.median()
+            
+            # ANALYST FIX 4: Blend CAGR and Median to ignore anomalies (like demergers)
+            blended_growth = (cagr * 0.4) + (median_yoy * 0.6)
+            growth = float(np.clip(blended_growth, -0.15, 0.30))
+            
+            if yoy.min() < -0.20:
+                notes.append("WARNING: A massive revenue drop (>20%) was detected in the historical data. "
+                             "This could be due to a demerger, an acquisition, or a severe operational decline. "
+                             "The model used a smoothed median growth rate, but please review the inputs carefully.")
+        elif len(rev) >= 2:
+            growth = float(np.clip((rev.iloc[-1] / rev.iloc[0]) ** (1 / (len(rev) - 1)) - 1, -0.15, 0.30))
         else:
             notes.append("Revenue growth: not enough history, default 10% used.")
     else:
@@ -316,7 +332,7 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
 
     tax = 0.25
     if {"tax", "pretax"} <= set(h.columns):
-        r = (h["tax"] / h["pretax"]).where(h["pretax"] > 0).replace([np.inf, -np.inf], np.nan).dropna()
+        r = (h["tax"] / h["pretax"]).where(h["pretax"] > 0).replace([np.inf, -np.inf], np.nan).dropna().tail(3)
         if len(r):
             tax = float(np.clip(r.mean(), 0.15, 0.35))
     else:
@@ -325,9 +341,10 @@ def suggest_assumptions(cd: CompanyData) -> tuple[dict, list]:
     basis = "last fiscal year"
     if cd.ttm_revenue_cr and cd.ttm_revenue_cr > 0:
         rev0, basis = cd.ttm_revenue_cr, "trailing 12 months"
+        
     return {"revenue0": rev0, "revenue_basis": basis, "growth": growth,
-            "ebit_margin": ratio("ebit", -0.2, 0.6, 0.15, "EBIT margin"), "tax_rate": tax,
-            "da_pct": ratio("da", 0.0, 0.3, 0.04, "D&A"), "capex_pct": ratio("capex", 0.0, 0.3, 0.05, "Capex"),
+            "ebit_margin": ratio("ebit", -0.1, 0.6, 0.15, "EBIT margin"), "tax_rate": tax,
+            "da_pct": ratio("da", 0.0, 0.3, 0.04, "D&A"), "capex_pct": ratio("capex", 0.0, 0.15, 0.05, "Capex"),
             "nwc_pct": 0.10}, notes
 
 
